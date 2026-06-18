@@ -44,8 +44,11 @@
         .zone { min-height: 80px; border-radius: 8px; padding: 15px 8px 8px 8px; display: flex; flex-wrap: wrap; gap: 6px; align-content: flex-start; }
         .target-area { border: 2px dashed #cbd5e0; background: #fafafa; }
         .pool-area { border: 1px solid #cbd5e0; background: var(--pool-bg); }
-        .card { background: var(--primary); color: white; padding: 6px 12px; border-radius: 6px; cursor: grab; font-weight: bold; font-size: 1.1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .card.dragging { opacity: 0.4; transform: scale(0.95); }
+        .card { background: var(--primary); color: white; padding: 6px 12px; border-radius: 6px; cursor: grab; font-weight: bold; font-size: 1.1rem; box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: transform 0.1s, box-shadow 0.1s; touch-action: none; user-select: none; -webkit-user-select: none; }
+        .card:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        .card.dragging { opacity: 0; pointer-events: none; }
+        .card.drag-ghost { position: fixed; pointer-events: none; z-index: 9999; opacity: 0.9; transform: rotate(2deg) scale(1.05); box-shadow: 0 8px 20px rgba(0,0,0,0.25); transition: none; }
+        .drop-placeholder { background: #bfdbfe; border: 2px dashed #3b82f6; border-radius: 6px; min-width: 40px; height: 36px; display: inline-flex; align-items: center; justify-content: center; }
         
         .tabs { display: flex; gap: 10px; margin-bottom: 20px; border-bottom: 2px solid #eee; }
         .tab-btn { padding: 10px 25px; border: none; background: none; cursor: pointer; font-size: 1.1rem; color: #888; }
@@ -281,56 +284,239 @@
         setupDropZone(target, idx);
     }
 
+    // ===== 拖曳 + 點擊 系統 =====
+    // pendingPress：按下但還不確定是點擊或拖曳
+    let pendingPress = null; // { card, teamIdx, startX, startY }
+    let dragState = null;    // { card, teamIdx, ghost, offsetX, offsetY }
+    const DRAG_THRESHOLD = 6; // 超過 6px 才算拖曳
+
     function createCard(word, teamIdx) {
         const card = document.createElement('div');
         card.className = 'card';
         card.textContent = word;
-        card.draggable = true;
+        card.draggable = false;
 
-        card.addEventListener('click', () => {
-            const target = document.getElementById(`target-zone-${teamIdx}`);
-            const pool = document.getElementById(`source-pool-${teamIdx}`);
-            if (card.parentNode === pool) {
-                target.appendChild(card);
-            } else {
-                pool.appendChild(card);
-            }
+        // ── 滑鼠 ──
+        card.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            pendingPress = { card, teamIdx, startX: e.clientX, startY: e.clientY };
+            document.addEventListener('mousemove', onMousePendingMove);
+            document.addEventListener('mouseup', onMousePendingUp);
         });
 
-        card.addEventListener('dragstart', (e) => {
-            card.classList.add('dragging');
-            e.dataTransfer.setData('text/plain', '');
-        });
-
-        card.addEventListener('dragend', () => {
-            card.classList.remove('dragging');
-        });
+        // ── 觸控 ──
+        card.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const t = e.touches[0];
+            pendingPress = { card, teamIdx, startX: t.clientX, startY: t.clientY };
+            document.addEventListener('touchmove', onTouchPendingMove, { passive: false });
+            document.addEventListener('touchend', onTouchPendingUp);
+        }, { passive: false });
 
         return card;
     }
 
-    function setupDropZone(zone, teamIdx) {
-        zone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            zone.style.borderColor = '#4a90e2';
-            zone.style.backgroundColor = '#dbeafe';
+    // 滑鼠：移動超過閾值 → 升級為拖曳
+    function onMousePendingMove(e) {
+        if (!pendingPress) return;
+        const dx = e.clientX - pendingPress.startX;
+        const dy = e.clientY - pendingPress.startY;
+        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+            const p = pendingPress;
+            cancelPendingPress(false);
+            activateDrag(p.card, p.teamIdx, p.startX, p.startY);
+            moveDrag(e.clientX, e.clientY);
+            document.addEventListener('mousemove', onDragMove);
+            document.addEventListener('mouseup', onDragEnd);
+        }
+    }
+
+    // 滑鼠：沒有超過閾值就鬆開 → 視為點擊
+    function onMousePendingUp(e) {
+        if (!pendingPress) return;
+        const p = pendingPress;
+        cancelPendingPress(false);
+        doClick(p.card, p.teamIdx);
+    }
+
+    // 觸控：移動超過閾值 → 升級為拖曳
+    function onTouchPendingMove(e) {
+        if (!pendingPress) return;
+        e.preventDefault();
+        const t = e.touches[0];
+        const dx = t.clientX - pendingPress.startX;
+        const dy = t.clientY - pendingPress.startY;
+        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+            const p = pendingPress;
+            cancelPendingPress(true);
+            activateDrag(p.card, p.teamIdx, p.startX, p.startY);
+            moveDrag(t.clientX, t.clientY);
+            document.addEventListener('touchmove', onTouchMove, { passive: false });
+            document.addEventListener('touchend', onDragEnd);
+        }
+    }
+
+    // 觸控：沒有超過閾值就鬆開 → 視為點擊
+    function onTouchPendingUp(e) {
+        if (!pendingPress) return;
+        const p = pendingPress;
+        cancelPendingPress(true);
+        doClick(p.card, p.teamIdx);
+    }
+
+    function cancelPendingPress(isTouch) {
+        pendingPress = null;
+        document.removeEventListener('mousemove', onMousePendingMove);
+        document.removeEventListener('mouseup', onMousePendingUp);
+        document.removeEventListener('touchmove', onTouchPendingMove);
+        document.removeEventListener('touchend', onTouchPendingUp);
+    }
+
+    // 點擊邏輯：池子 ↔ 語序區互換；語序區內點擊選中後再點目標位置
+    function doClick(card, teamIdx) {
+        const target = document.getElementById(`target-zone-${teamIdx}`);
+        const pool = document.getElementById(`source-pool-${teamIdx}`);
+        if (card.parentNode === pool) {
+            // 從池子移到語序區末尾
+            target.appendChild(card);
+        } else {
+            // 從語序區移回池子
+            pool.appendChild(card);
+        }
+        // 點擊後閃爍回饋
+        card.style.transition = 'transform 0.12s';
+        card.style.transform = 'scale(1.18)';
+        setTimeout(() => { card.style.transform = ''; }, 120);
+    }
+
+    // 正式啟動拖曳（已確認超過閾值）
+    function activateDrag(card, teamIdx, startX, startY) {
+        const rect = card.getBoundingClientRect();
+        const offsetX = startX - rect.left;
+        const offsetY = startY - rect.top;
+
+        const ghost = document.createElement('div');
+        ghost.className = 'card drag-ghost';
+        ghost.textContent = card.textContent;
+        ghost.style.width = rect.width + 'px';
+        ghost.style.left = rect.left + 'px';
+        ghost.style.top = rect.top + 'px';
+        document.body.appendChild(ghost);
+
+        card.classList.add('dragging');
+        dragState = { card, teamIdx, ghost, offsetX, offsetY };
+    }
+
+    function onDragMove(e) {
+        if (!dragState) return;
+        moveDrag(e.clientX, e.clientY);
+    }
+
+    function onTouchMove(e) {
+        if (!dragState) return;
+        e.preventDefault();
+        moveDrag(e.touches[0].clientX, e.touches[0].clientY);
+    }
+
+    function moveDrag(clientX, clientY) {
+        const { ghost, offsetX, offsetY, teamIdx } = dragState;
+        ghost.style.left = (clientX - offsetX) + 'px';
+        ghost.style.top  = (clientY - offsetY) + 'px';
+
+        document.querySelectorAll('.drop-placeholder').forEach(p => p.remove());
+
+        ghost.style.visibility = 'hidden';
+        const el = document.elementFromPoint(clientX, clientY);
+        ghost.style.visibility = '';
+
+        const zone = el ? el.closest('.zone') : null;
+        if (!zone) { resetZoneHighlight(teamIdx); return; }
+
+        const placeholder = document.createElement('div');
+        placeholder.className = 'drop-placeholder';
+        zone.insertBefore(placeholder, getInsertBefore(zone, clientX, clientY));
+        highlightZone(teamIdx, zone);
+    }
+
+    // 二維排列感知：先找同行最近，再跨行比較
+    function getInsertBefore(zone, clientX, clientY) {
+        const cards = Array.from(zone.children).filter(
+            c => !c.classList.contains('drop-placeholder') && !c.classList.contains('dragging')
+        );
+        if (!cards.length) return null;
+
+        // 找距離最近的插入縫隙
+        let best = null, bestDist = Infinity;
+        cards.forEach((c, i) => {
+            const r = c.getBoundingClientRect();
+            // 每張卡左邊縫隙
+            const dist = Math.hypot(clientX - r.left, clientY - (r.top + r.height / 2));
+            if (dist < bestDist) { bestDist = dist; best = c; }
         });
+        // 最後一張卡右邊縫隙
+        const last = cards[cards.length - 1];
+        const lr = last.getBoundingClientRect();
+        const distLast = Math.hypot(clientX - (lr.right), clientY - (lr.top + lr.height / 2));
+        if (distLast < bestDist) return null; // 插末尾
 
-        zone.addEventListener('dragleave', () => {
-            zone.style.borderColor = '';
-            zone.style.backgroundColor = '';
-        });
+        return best;
+    }
 
-        zone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            zone.style.borderColor = '';
-            zone.style.backgroundColor = '';
-
-            const draggingCard = document.querySelector('.card.dragging');
-            if (draggingCard) {
-                zone.appendChild(draggingCard);
+    function highlightZone(teamIdx, activeZone) {
+        const target = document.getElementById(`target-zone-${teamIdx}`);
+        const pool = document.getElementById(`source-pool-${teamIdx}`);
+        [target, pool].forEach(z => {
+            if (!z) return;
+            if (z === activeZone) {
+                z.style.borderColor = '#3b82f6';
+                z.style.backgroundColor = '#eff6ff';
+            } else {
+                z.style.borderColor = '';
+                z.style.backgroundColor = '';
             }
         });
+    }
+
+    function resetZoneHighlight(teamIdx) {
+        const target = document.getElementById(`target-zone-${teamIdx}`);
+        const pool = document.getElementById(`source-pool-${teamIdx}`);
+        [target, pool].forEach(z => { if (z) { z.style.borderColor = ''; z.style.backgroundColor = ''; } });
+    }
+
+    function onDragEnd(e) {
+        if (!dragState) return;
+        const { card, teamIdx, ghost } = dragState;
+
+        const clientX = e.clientX ?? e.changedTouches?.[0]?.clientX;
+        const clientY = e.clientY ?? e.changedTouches?.[0]?.clientY;
+
+        ghost.style.visibility = 'hidden';
+        const el = clientX != null ? document.elementFromPoint(clientX, clientY) : null;
+        ghost.style.visibility = '';
+
+        const zone = el ? el.closest('.zone') : null;
+        const placeholder = document.querySelector('.drop-placeholder');
+
+        if (zone && placeholder && placeholder.parentNode === zone) {
+            zone.insertBefore(card, placeholder);
+        }
+        // zone 不存在或無占位符 → 留在原位（card 仍在 DOM，dragging class 移除即可顯示）
+
+        placeholder?.remove();
+        ghost.remove();
+        card.classList.remove('dragging');
+        resetZoneHighlight(teamIdx);
+
+        dragState = null;
+        document.removeEventListener('mousemove', onDragMove);
+        document.removeEventListener('mouseup', onDragEnd);
+        document.removeEventListener('touchmove', onTouchMove);
+        document.removeEventListener('touchend', onDragEnd);
+    }
+
+    function setupDropZone(zone, teamIdx) {
+        // 新系統在全域事件處理，此處保留空函式以維持呼叫相容
     }
 
     function checkAnswer(teamIdx) {
