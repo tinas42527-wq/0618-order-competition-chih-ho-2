@@ -278,6 +278,8 @@
                 <div id="source-pool-${idx}" class="zone pool-area"></div>
             </div>
             <button class="btn-main" style="background:${color}" onclick="checkAnswer(${idx})">檢查答案</button>
+            <button class="btn-main" style="background:#fffbeb; color:#744210; border:1px solid #ecc94b; margin-top:5px;" onclick="toggleHint(${idx})">💡 正確手語語序</button>
+            <div id="hint-box-${idx}" style="display:none; margin-top:8px; padding:10px 12px; background:#fffbeb; border:1px dashed #ecc94b; border-radius:8px; color:#744210; font-weight:bold; line-height:1.6;"></div>
             <button class="btn-main" style="background:#edf2f7; color:#4a5568; margin-top:5px;" onclick="refreshSingleTeam(${idx})">🔄 換一題</button>
         `;
 
@@ -543,6 +545,24 @@
 
     function setupDropZone(zone, teamIdx) {
         // 新系統在全域事件處理，此處保留空函式以維持呼叫相容
+    }
+
+    // 💡 顯示／隱藏正確手語語序（供學生一直答不對時參考，不會加分）
+    function toggleHint(idx) {
+        const box = document.getElementById(`hint-box-${idx}`);
+        const data = teamCurrentQuestions[idx];
+        if (!box || !data) return;
+        if (box.style.display === 'block') {
+            box.style.display = 'none';
+            return;
+        }
+        box.innerHTML = '';
+        data.question.answers.forEach((ans, i) => {
+            const line = document.createElement('div');
+            line.textContent = (data.question.answers.length > 1 ? `答案${i + 1}：` : '正確語序：') + ans.join(' → ');
+            box.appendChild(line);
+        });
+        box.style.display = 'block';
     }
 
     function checkAnswer(teamIdx) {
@@ -1104,3 +1124,4 @@
 </script>
 </body>
 </html>
+
